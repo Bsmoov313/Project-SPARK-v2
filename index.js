@@ -1,84 +1,73 @@
 // index.js (ESM)
 // Express server + Google Drive change watcher with subfolder support
-// + easy test endpoints (simulate Drive or send a fake file directly)
+// Includes: /health, /test/process, /test/drive-notify, /drive/register, /drive/notify
 
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-// ---------- ENV VARS you set in App Hosting ----------
+// ---------- ENV VARS (set these in Firebase App Hosting / apphosting.yaml via secrets) ----------
 const {
-  // For Drive watch + scanning:
-  DRIVE_SERVICE_ACCOUNT_JSON, // JSON (or base64) of service account key that has access to the Cube ACR folder
-  DRIVE_FOLDER_ID,            // the Cube ACR root folder ID (NOT a date subfolder)
-  PROCESS_WEBHOOK_URL,        // your processing endpoint (e.g. https://<your-app>/api/process-recording)
-  DRIVE_VERIFY_TOKEN = "",    // optional: echoed by Google in X-Goog-Channel-Token
-
-  // Optional convenience for logs/links:
-  APP_HOST_URL = ""
+  // Base64 of your service account JSON (or raw JSON string)
+  DRIVE_SERVICE_ACCOUNT_JSON,
+  // The Cube ACR **root** folder ID (not a dated subfolder)
+  DRIVE_FOLDER_ID,
+  // Where to POST new audio file notifications for processing
+  PROCESS_WEBHOOK_URL,
+  // Optional: token Google will echo in notify headers; we validate it
+  DRIVE_VERIFY_TOKEN = "",
+  // Optional: your public app URL (used only for /drive/register)
+  APP_HOST_URL = "",
 } = process.env;
 
-// In-memory Drive page token (simple for now; we can persist later)
-let lastPageToken = null;
-
-// ---------- Basic server ----------
+// ---------- App setup ----------
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
-// Health
+// Basic landing
 app.get("/", (_req, res) => {
-  res.status(200).send("🚀 SPARK v2 App Hosting server up.");
+  res
+    .status(200)
+    .send(
+      `<html><head><meta charset="utf-8"><title>SPARK v2</title></head><body style="font-family:system-ui;padding:24px">
+        <h1>🚀 SPARK v2 App Hosting server</h1>
+        <p>Up and running.</p>
+        <ul>
+          <li>GET <code>/health</code></li>
+          <li>POST <code>/test/process</code></li>
+          <li>POST <code>/test/drive-notify</code></li>
+          <li>POST <code>/drive/register</code></li>
+          <li>POST <code>/drive/notify</code></li>
+        </ul>
+      </body></html>`
+    );
 });
 
-// ---------- Helpers ----------
-const AUDIO_EXTS = [".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4b"];
-const FOLDER_MIME = "application/vnd.google-apps.folder";
+// HEALTH: simple 200 OK for scripts/monitors
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, service: "spark-v2", ts: Date.now() });
+});
 
-const isAudio = (name = "", mime = "") =>
-  (mime && mime.startsWith("audio/")) ||
-  AUDIO_EXTS.some((ext) => (name || "").toLowerCase().endsWith(ext));
-
-const detectCallType = (name = "") => {
-  const n = (name || "").toLowerCase();
-  if (n.includes("incoming")) return "incoming";
-  if (n.includes("outgoing")) return "outgoing";
-  return "unknown";
-};
-
-async function postToProcessor(payload) {
-  if (!PROCESS_WEBHOOK_URL) {
-    console.error("Missing PROCESS_WEBHOOK_URL; cannot send payload.");
-    return { ok: false, status: 500, text: "PROCESS_WEBHOOK_URL not set" };
-  }
-  try {
-    const r = await fetch(PROCESS_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const txt = await r.text().catch(() => "");
-    if (!r.ok) console.error("PROCESS_WEBHOOK_URL failed:", r.status, txt);
-    return { ok: r.ok, status: r.status, text: txt || "" };
-  } catch (e) {
-    console.error("Webhook POST error:", e.message);
-    return { ok: false, status: 500, text: e.message };
-  }
-}
-
-// ----- Google Drive auth (service account) -----
+// ---------- Google Drive auth (service account) ----------
 function driveClient() {
-  if (!DRIVE_SERVICE_ACCOUNT_JSON) throw new Error("Missing DRIVE_SERVICE_ACCOUNT_JSON env.");
-  // Accept base64 or raw JSON
+  if (!DRIVE_SERVICE_ACCOUNT_JSON) {
+    throw new Error("Missing env: DRIVE_SERVICE_ACCOUNT_JSON");
+  }
+  // allow base64 or raw JSON
   let raw = DRIVE_SERVICE_ACCOUNT_JSON;
   try {
-    const decoded = Buffer.from(DRIVE_SERVICE_ACCOUNT_JSON, "base64").toString("utf8");
-    // If base64 was actually raw JSON, JSON.parse below will still work
-    if (decoded && decoded.trim().startsWith("{")) raw = decoded;
-  } catch (_) { /* ignore */ }
-
-  const keyObj = JSON.parse(raw);
+    raw = Buffer.from(DRIVE_SERVICE_ACCOUNT_JSON, "base64").toString("utf8");
+    // if decode produced binary-ish junk, JSON.parse will fail and we'll fall back
+  } catch {}
+  const keyObj = (() => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return JSON.parse(DRIVE_SERVICE_ACCOUNT_JSON);
+    }
+  })();
 
   const jwt = new google.auth.JWT(
     keyObj.client_email,
@@ -86,27 +75,39 @@ function driveClient() {
     keyObj.private_key,
     [
       "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.metadata.readonly"
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
     ]
   );
   return google.drive({ version: "v3", auth: jwt });
 }
 
-// Cache parents to reduce API calls
+const AUDIO_EXTS = [".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4b"];
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+const isAudio = (name = "", mime = "") =>
+  mime.startsWith("audio/") ||
+  AUDIO_EXTS.some((ext) => name.toLowerCase().endsWith(ext));
+const detectCallType = (name = "") => {
+  const n = name.toLowerCase();
+  if (n.includes("incoming")) return "incoming";
+  if (n.includes("outgoing")) return "outgoing";
+  return "unknown";
+};
+
+// parent cache for fewer Drive calls
 const parentCache = new Map(); // id -> parents[]
 async function getParents(drive, id) {
   if (parentCache.has(id)) return parentCache.get(id);
   const { data } = await drive.files.get({
     fileId: id,
     fields: "id,parents",
-    supportsAllDrives: true
+    supportsAllDrives: true,
   });
   const parents = data.parents || [];
   parentCache.set(id, parents);
   return parents;
 }
 
-// Climb up until we hit the root Cube ACR folder or Drive root
+// climb up until we hit the root Cube ACR folder or Drive root
 async function isInSubtree(drive, fileOrFolderId, rootFolderId) {
   let stack = [fileOrFolderId];
   const seen = new Set();
@@ -115,38 +116,45 @@ async function isInSubtree(drive, fileOrFolderId, rootFolderId) {
     if (!cur || seen.has(cur)) continue;
     seen.add(cur);
     const parents = await getParents(drive, cur);
-    if (!parents.length) return false; // reached root
+    if (!parents.length) return false; // reached Drive root
     if (parents.includes(rootFolderId)) return true;
     stack.push(...parents);
   }
   return false;
 }
 
-// ---------- 1) Register a Drive watch channel ----------
-// Call this once (POST /drive/register) after env vars are set and the app is reachable publicly.
+// In-memory Drive page token (good enough for single instance)
+let lastPageToken = null;
+
+// ---------- 1) Register a Drive watch channel (manual trigger) ----------
 app.post("/drive/register", async (_req, res) => {
   try {
     if (!DRIVE_FOLDER_ID || !PROCESS_WEBHOOK_URL) {
-      return res.status(400).json({ error: "Missing DRIVE_FOLDER_ID or PROCESS_WEBHOOK_URL" });
+      return res
+        .status(400)
+        .json({ error: "Missing DRIVE_FOLDER_ID or PROCESS_WEBHOOK_URL" });
     }
-    const drive = driveClient();
-
-    // get or refresh a startPageToken
-    const { data: token } = await drive.changes.getStartPageToken({ supportsAllDrives: true });
-    lastPageToken = token.startPageToken;
-
-    const notifyUrl = APP_HOST_URL
-      ? `${APP_HOST_URL.replace(/\/+$/, "")}/drive/notify`
-      : null;
-
-    if (!notifyUrl) {
+    if (!APP_HOST_URL) {
       return res.status(400).json({
-        error: "APP_HOST_URL not set; set it to your live app URL so Drive can call /drive/notify."
+        error:
+          "APP_HOST_URL is required for Drive to call your /drive/notify endpoint.",
       });
     }
 
+    const drive = driveClient();
+
+    // start page token
+    const { data: token } = await drive.changes.getStartPageToken({
+      supportsAllDrives: true,
+    });
+    lastPageToken = token.startPageToken;
+
     // Create channel
-    const channelId = `chan_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const channelId = `chan_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2)}`;
+    const notifyUrl = `${APP_HOST_URL.replace(/\/$/, "")}/drive/notify`;
+
     const { data: watch } = await drive.changes.watch({
       pageToken: lastPageToken,
       supportsAllDrives: true,
@@ -154,8 +162,8 @@ app.post("/drive/register", async (_req, res) => {
         id: channelId,
         type: "web_hook",
         address: notifyUrl,
-        token: DRIVE_VERIFY_TOKEN || undefined
-      }
+        token: DRIVE_VERIFY_TOKEN || undefined,
+      },
     });
 
     return res.status(200).json({
@@ -163,7 +171,7 @@ app.post("/drive/register", async (_req, res) => {
       message: "Drive watch registered.",
       channel: { id: watch.id, resourceId: watch.resourceId },
       pageToken: lastPageToken,
-      notifyUrl
+      notifyUrl,
     });
   } catch (err) {
     console.error("register error:", err);
@@ -174,33 +182,34 @@ app.post("/drive/register", async (_req, res) => {
 // ---------- 2) Drive webhook receiver ----------
 app.post("/drive/notify", async (req, res) => {
   try {
-    // Optional token check
+    // Optional token check from header
     const token = req.get("X-Goog-Channel-Token") || "";
     if (DRIVE_VERIFY_TOKEN && token !== DRIVE_VERIFY_TOKEN) {
       return res.status(403).send("bad token");
     }
 
-    // Immediately ack; then process in background (best-effort)
+    // Ack immediately
     res.status(204).end();
 
     // Process changes since lastPageToken
     await harvestChangesAndDispatch();
   } catch (err) {
     console.error("notify error:", err);
-    // Acked already
+    // already acked
   }
 });
 
-// Harvest Drive changes and send to processor
 async function harvestChangesAndDispatch() {
   if (!DRIVE_FOLDER_ID || !PROCESS_WEBHOOK_URL) {
     throw new Error("Missing DRIVE_FOLDER_ID or PROCESS_WEBHOOK_URL.");
   }
   const drive = driveClient();
 
-  // If we don't have a saved token yet, start now
+  // ensure we have a starting token
   if (!lastPageToken) {
-    const { data: token } = await drive.changes.getStartPageToken({ supportsAllDrives: true });
+    const { data: token } = await drive.changes.getStartPageToken({
+      supportsAllDrives: true,
+    });
     lastPageToken = token.startPageToken;
   }
 
@@ -213,7 +222,7 @@ async function harvestChangesAndDispatch() {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
       fields:
-        "changes(fileId,file(name,mimeType,parents,webViewLink,webContentLink,createdTime,modifiedTime)),nextPageToken,newStartPageToken"
+        "changes(fileId,file(id,name,mimeType,parents,webViewLink,webContentLink,createdTime,modifiedTime)),nextPageToken,newStartPageToken",
     });
 
     nextToken = data.nextPageToken || null;
@@ -239,80 +248,69 @@ async function harvestChangesAndDispatch() {
         mimeType: f.mimeType,
         createdAt: f.createdTime,
         modifiedAt: f.modifiedTime,
-        callType: detectCallType(f.name)
+        callType: detectCallType(f.name),
       };
 
-      await postToProcessor(payload);
+      try {
+        const r = await fetch(PROCESS_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          console.error("PROCESS_WEBHOOK_URL failed:", r.status, t);
+        }
+      } catch (e) {
+        console.error("Webhook POST error:", e.message);
+      }
     }
   } while (nextToken);
 
   if (newStart) lastPageToken = newStart;
 }
 
-// ---------- 3) Test endpoints ----------
-
-// (A) Trigger the real Drive scan (as if Drive called /drive/notify)
-app.post("/test-drive-notify", async (_req, res) => {
+// ---------- TEST ROUTES ----------
+app.post("/test/process", async (req, res) => {
   try {
-    await harvestChangesAndDispatch();
-    res.json({ ok: true, mode: "drive-scan" });
+    const payload =
+      req.body && Object.keys(req.body).length
+        ? req.body
+        : {
+            source: "manual_test",
+            fileId: "TEST_FILE_ID",
+            fileName: "TEST_FILE_NAME.m4a",
+            mimeType: "audio/m4a",
+            callType: "outgoing",
+            createdAt: new Date().toISOString(),
+            modifiedAt: new Date().toISOString(),
+          };
+
+    if (!PROCESS_WEBHOOK_URL) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "PROCESS_WEBHOOK_URL not set" });
+    }
+
+    const r = await fetch(PROCESS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    res.status(200).json({ ok: true, echoed: payload, downstream: r.status, body: text.slice(0, 3000) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// (B) Simulate a single “new recording” WITHOUT Drive.
-//     You can POST JSON or call it via GET with query params.
-app.post("/test-simulate-file", async (req, res) => {
-  const {
-    fileName = "Incoming Call.m4a",
-    mimeType = "audio/m4a",
-    webViewLink = null,
-    webContentLink = null,
-  } = req.body || {};
-
-  const payload = {
-    source: "simulated",
-    fileId: null,
-    webViewLink,
-    webContentLink,
-    fileName,
-    mimeType,
-    createdAt: new Date().toISOString(),
-    modifiedAt: new Date().toISOString(),
-    callType: detectCallType(fileName)
-  };
-
-  const result = await postToProcessor(payload);
-  res.status(result.ok ? 200 : 500).json({ ok: result.ok, status: result.status, payload, response: result.text });
-});
-
-// Optional: GET version for quick tests from a phone browser.
-// Example:  /test-simulate-file?fileName=Outgoing%20Call.mp3
-app.get("/test-simulate-file", async (req, res) => {
-  const fileName = req.query.fileName || "Incoming Call.m4a";
-  const mimeType = req.query.mimeType || "audio/m4a";
-  const webViewLink = req.query.webViewLink || null;
-  const webContentLink = req.query.webContentLink || null;
-
-  const payload = {
-    source: "simulated",
-    fileId: null,
-    webViewLink,
-    webContentLink,
-    fileName,
-    mimeType,
-    createdAt: new Date().toISOString(),
-    modifiedAt: new Date().toISOString(),
-    callType: detectCallType(String(fileName))
-  };
-
-  const result = await postToProcessor(payload);
-  res
-    .status(result.ok ? 200 : 500)
-    .send(
-      `Sent simulated payload for "${fileName}". Processor status: ${result.status}. ${result.text || ""}`
-    );
+app.post("/test/drive-notify", async (_req, res) => {
+  try {
+    await harvestChangesAndDispatch();
+    res.status(200).json({ ok: true, ran: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // ---------- Start server ----------
