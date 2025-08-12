@@ -7,7 +7,7 @@ run:
   maxInstances: 3
 
 env:
-  # Secrets from Google Secret Manager (you already created + granted access)
+  # Secrets pulled from Secret Manager
   secrets:
     - variable: GOOGLE_CLIENT_ID
       secret: GOOGLE_CLIENT_ID
@@ -16,21 +16,23 @@ env:
     - variable: GOOGLE_REFRESH_TOKEN
       secret: GOOGLE_REFRESH_TOKEN
 
-  # Plain environment variables
+  # Plain environment variables (must be a list of {variable, value})
   variables:
-    NODE_ENV: "production"
+    - variable: NODE_ENV
+      value: "production"
 
-    # REQUIRED for tests to pass:
-    # Your hosted app URL (copy from App Hosting > Overview)
-    APP_HOST_URL: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app"
+    # copy your actual hosted URL here
+    - variable: APP_HOST_URL
+      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app"
 
-    # For quick testing, point the processor to our local echo endpoint.
-    # Later, change this to your real processor URL.
-    PROCESS_WEBHOOK_URL: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app/dev/echo"
+    # for quick testing we point to the local echo endpoint
+    - variable: PROCESS_WEBHOOK_URL
+      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app/dev/echo"
 
-    # Put your real Cube ACR *root* Drive folder id here when you’re ready.
-    # Leaving it blank will make /test/drive-notify complain (by design).
-    DRIVE_FOLDER_ID: "1L7MTRrJMpH1YE-V8GP7T6cYWpxSdgkQS"
+    # put your real Drive root folder ID when ready
+    - variable: DRIVE_FOLDER_ID
+      value: ""
 
-    # Optional shared-secret for Drive webhook verification
-    DRIVE_VERIFY_TOKEN: ""
+    # optional shared secret used by /drive/notify
+    - variable: DRIVE_VERIFY_TOKEN
+      value: ""
