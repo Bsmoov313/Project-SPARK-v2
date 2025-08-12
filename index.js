@@ -1,5 +1,6 @@
 // index.js (ESM)
 // Express server + Google Drive change watcher with subfolder support
+// + easy test endpoints (simulate Drive or send a fake file directly)
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -8,14 +9,17 @@ import { google } from "googleapis";
 
 // ---------- ENV VARS you set in App Hosting ----------
 const {
-  // Share your Cube ACR *root folder* with this service account email
-  DRIVE_SERVICE_ACCOUNT_JSON, // paste JSON (or base64) of service account key
+  // For Drive watch + scanning:
+  DRIVE_SERVICE_ACCOUNT_JSON, // JSON (or base64) of service account key that has access to the Cube ACR folder
   DRIVE_FOLDER_ID,            // the Cube ACR root folder ID (NOT a date subfolder)
   PROCESS_WEBHOOK_URL,        // your processing endpoint (e.g. https://<your-app>/api/process-recording)
-  DRIVE_VERIFY_TOKEN = ""     // optional: set to any strong string; Drive will echo it in header
+  DRIVE_VERIFY_TOKEN = "",    // optional: echoed by Google in X-Goog-Channel-Token
+
+  // Optional convenience for logs/links:
+  APP_HOST_URL = ""
 } = process.env;
 
-// In-memory Drive page token (simple for now; we can move to Firestore later)
+// In-memory Drive page token (simple for now; we can persist later)
 let lastPageToken = null;
 
 // ---------- Basic server ----------
@@ -28,37 +32,67 @@ app.get("/", (_req, res) => {
   res.status(200).send("🚀 SPARK v2 App Hosting server up.");
 });
 
-// ----- Google Drive auth (service account) -----
-function driveClient() {
-  if (!DRIVE_SERVICE_ACCOUNT_JSON) throw new Error("Missing DRIVE_SERVICE_ACCOUNT_JSON env.");
-  const keyObj = JSON.parse(
-    // allow base64 or raw JSON
-    Buffer.from(DRIVE_SERVICE_ACCOUNT_JSON, "base64").toString("utf8") || DRIVE_SERVICE_ACCOUNT_JSON
-  );
-
-  const jwt = new google.auth.JWT(
-    keyObj.client_email,
-    null,
-    keyObj.private_key,
-    ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.metadata.readonly"]
-  );
-  return google.drive({ version: "v3", auth: jwt });
-}
-
+// ---------- Helpers ----------
 const AUDIO_EXTS = [".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4b"];
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 const isAudio = (name = "", mime = "") =>
-  mime.startsWith("audio/") || AUDIO_EXTS.some((ext) => name.toLowerCase().endsWith(ext));
+  (mime && mime.startsWith("audio/")) ||
+  AUDIO_EXTS.some((ext) => (name || "").toLowerCase().endsWith(ext));
 
 const detectCallType = (name = "") => {
-  const n = name.toLowerCase();
+  const n = (name || "").toLowerCase();
   if (n.includes("incoming")) return "incoming";
   if (n.includes("outgoing")) return "outgoing";
   return "unknown";
 };
 
-// parent cache for fewer Drive calls
+async function postToProcessor(payload) {
+  if (!PROCESS_WEBHOOK_URL) {
+    console.error("Missing PROCESS_WEBHOOK_URL; cannot send payload.");
+    return { ok: false, status: 500, text: "PROCESS_WEBHOOK_URL not set" };
+  }
+  try {
+    const r = await fetch(PROCESS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const txt = await r.text().catch(() => "");
+    if (!r.ok) console.error("PROCESS_WEBHOOK_URL failed:", r.status, txt);
+    return { ok: r.ok, status: r.status, text: txt || "" };
+  } catch (e) {
+    console.error("Webhook POST error:", e.message);
+    return { ok: false, status: 500, text: e.message };
+  }
+}
+
+// ----- Google Drive auth (service account) -----
+function driveClient() {
+  if (!DRIVE_SERVICE_ACCOUNT_JSON) throw new Error("Missing DRIVE_SERVICE_ACCOUNT_JSON env.");
+  // Accept base64 or raw JSON
+  let raw = DRIVE_SERVICE_ACCOUNT_JSON;
+  try {
+    const decoded = Buffer.from(DRIVE_SERVICE_ACCOUNT_JSON, "base64").toString("utf8");
+    // If base64 was actually raw JSON, JSON.parse below will still work
+    if (decoded && decoded.trim().startsWith("{")) raw = decoded;
+  } catch (_) { /* ignore */ }
+
+  const keyObj = JSON.parse(raw);
+
+  const jwt = new google.auth.JWT(
+    keyObj.client_email,
+    null,
+    keyObj.private_key,
+    [
+      "https://www.googleapis.com/auth/drive.readonly",
+      "https://www.googleapis.com/auth/drive.metadata.readonly"
+    ]
+  );
+  return google.drive({ version: "v3", auth: jwt });
+}
+
+// Cache parents to reduce API calls
 const parentCache = new Map(); // id -> parents[]
 async function getParents(drive, id) {
   if (parentCache.has(id)) return parentCache.get(id);
@@ -72,7 +106,7 @@ async function getParents(drive, id) {
   return parents;
 }
 
-// climb up until we hit the root Cube ACR folder or Drive root
+// Climb up until we hit the root Cube ACR folder or Drive root
 async function isInSubtree(drive, fileOrFolderId, rootFolderId) {
   let stack = [fileOrFolderId];
   const seen = new Set();
@@ -89,7 +123,7 @@ async function isInSubtree(drive, fileOrFolderId, rootFolderId) {
 }
 
 // ---------- 1) Register a Drive watch channel ----------
-// Call this once (POST /drive/register) after you set env vars
+// Call this once (POST /drive/register) after env vars are set and the app is reachable publicly.
 app.post("/drive/register", async (_req, res) => {
   try {
     if (!DRIVE_FOLDER_ID || !PROCESS_WEBHOOK_URL) {
@@ -101,12 +135,15 @@ app.post("/drive/register", async (_req, res) => {
     const { data: token } = await drive.changes.getStartPageToken({ supportsAllDrives: true });
     lastPageToken = token.startPageToken;
 
-    // Build webhook URL (this server’s notify endpoint)
-    // Use your live domain if you have one; App Hosting usually proxies the Node app directly.
-    const baseUrl = process.env.APP_HOST_URL || ""; // set this env to your live app URL if needed
-    const notifyUrl = baseUrl
-      ? `${baseUrl}/drive/notify`
-      : `/drive/notify`; // If baseUrl empty, Drive will reject; set APP_HOST_URL after first deploy.
+    const notifyUrl = APP_HOST_URL
+      ? `${APP_HOST_URL.replace(/\/+$/, "")}/drive/notify`
+      : null;
+
+    if (!notifyUrl) {
+      return res.status(400).json({
+        error: "APP_HOST_URL not set; set it to your live app URL so Drive can call /drive/notify."
+      });
+    }
 
     // Create channel
     const channelId = `chan_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -154,6 +191,7 @@ app.post("/drive/notify", async (req, res) => {
   }
 });
 
+// Harvest Drive changes and send to processor
 async function harvestChangesAndDispatch() {
   if (!DRIVE_FOLDER_ID || !PROCESS_WEBHOOK_URL) {
     throw new Error("Missing DRIVE_FOLDER_ID or PROCESS_WEBHOOK_URL.");
@@ -204,25 +242,78 @@ async function harvestChangesAndDispatch() {
         callType: detectCallType(f.name)
       };
 
-      try {
-        const r = await fetch(PROCESS_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        if (!r.ok) {
-          const t = await r.text().catch(() => "");
-          console.error("PROCESS_WEBHOOK_URL failed:", r.status, t);
-        }
-      } catch (e) {
-        console.error("Webhook POST error:", e.message);
-      }
+      await postToProcessor(payload);
     }
   } while (nextToken);
 
-  // Save new token in memory (good for a single running instance)
   if (newStart) lastPageToken = newStart;
 }
+
+// ---------- 3) Test endpoints ----------
+
+// (A) Trigger the real Drive scan (as if Drive called /drive/notify)
+app.post("/test-drive-notify", async (_req, res) => {
+  try {
+    await harvestChangesAndDispatch();
+    res.json({ ok: true, mode: "drive-scan" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// (B) Simulate a single “new recording” WITHOUT Drive.
+//     You can POST JSON or call it via GET with query params.
+app.post("/test-simulate-file", async (req, res) => {
+  const {
+    fileName = "Incoming Call.m4a",
+    mimeType = "audio/m4a",
+    webViewLink = null,
+    webContentLink = null,
+  } = req.body || {};
+
+  const payload = {
+    source: "simulated",
+    fileId: null,
+    webViewLink,
+    webContentLink,
+    fileName,
+    mimeType,
+    createdAt: new Date().toISOString(),
+    modifiedAt: new Date().toISOString(),
+    callType: detectCallType(fileName)
+  };
+
+  const result = await postToProcessor(payload);
+  res.status(result.ok ? 200 : 500).json({ ok: result.ok, status: result.status, payload, response: result.text });
+});
+
+// Optional: GET version for quick tests from a phone browser.
+// Example:  /test-simulate-file?fileName=Outgoing%20Call.mp3
+app.get("/test-simulate-file", async (req, res) => {
+  const fileName = req.query.fileName || "Incoming Call.m4a";
+  const mimeType = req.query.mimeType || "audio/m4a";
+  const webViewLink = req.query.webViewLink || null;
+  const webContentLink = req.query.webContentLink || null;
+
+  const payload = {
+    source: "simulated",
+    fileId: null,
+    webViewLink,
+    webContentLink,
+    fileName,
+    mimeType,
+    createdAt: new Date().toISOString(),
+    modifiedAt: new Date().toISOString(),
+    callType: detectCallType(String(fileName))
+  };
+
+  const result = await postToProcessor(payload);
+  res
+    .status(result.ok ? 200 : 500)
+    .send(
+      `Sent simulated payload for "${fileName}". Processor status: ${result.status}. ${result.text || ""}`
+    );
+});
 
 // ---------- Start server ----------
 app.listen(PORT, () => {
