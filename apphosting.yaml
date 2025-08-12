@@ -1,4 +1,4 @@
-# apphosting.yaml — working schema (env as a list)
+# apphosting.yaml — working schema (env is a flat list)
 
 env:
   - variable: NODE_ENV
@@ -7,7 +7,7 @@ env:
     value: "https://project-spark-v2-533369688838.us-central1.run.app"
   - variable: PROCESS_WEBHOOK_URL
     value: "https://project-spark-v2-533369688838.us-central1.run.app/dev/echo"
-  # leave this blank for now unless you want /test/drive-notify to run
+  # leave empty until you’re ready to test the Drive harvester
   - variable: DRIVE_FOLDER_ID
     value: ""
   - variable: DRIVE_VERIFY_TOKEN
