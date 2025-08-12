@@ -1,6 +1,22 @@
+# apphosting.yaml — working schema (flat lists)
+
 env:
   - variable: NODE_ENV
     value: "production"
+
+  # Your public backend URL (the Cloud Run URL you shared)
+  - variable: APP_HOST_URL
+    value: "https://project-spark-v2-533369688838.us-central1.run.app"
+
+  # For now point the processor to our echo endpoint so tests pass
+  - variable: PROCESS_WEBHOOK_URL
+    value: "https://project-spark-v2-533369688838.us-central1.run.app/dev/echo"
+
+  # Optional: leave blank for now
+  - variable: DRIVE_FOLDER_ID
+    value: ""
+  - variable: DRIVE_VERIFY_TOKEN
+    value: ""
 
 secrets:
   - variable: GOOGLE_CLIENT_ID
