@@ -1,0 +1,19 @@
+# Firebase App Hosting config for Node.js backend
+run:
+  cpu: 1
+  memoryMiB: 512
+  minInstances: 0
+  maxInstances: 3
+
+env:
+  # Plain env var (not secret)
+  - variable: FIREBASE_PROJECT_ID
+    value: project-spark-v2
+
+  # Secrets (pulled at runtime from Secret Manager)
+  - variable: GOOGLE_CLIENT_ID
+    secret: GOOGLE_CLIENT_ID
+  - variable: GOOGLE_CLIENT_SECRET
+    secret: GOOGLE_CLIENT_SECRET
+  - variable: GOOGLE_REFRESH_TOKEN
+    secret: GOOGLE_REFRESH_TOKEN
