@@ -1,8 +1,17 @@
-# Minimal, known-good apphosting.yaml
+# apphosting.yaml — working schema (env as a list)
 
 env:
   - variable: NODE_ENV
     value: "production"
+  - variable: APP_HOST_URL
+    value: "https://project-spark-v2-533369688838.us-central1.run.app"
+  - variable: PROCESS_WEBHOOK_URL
+    value: "https://project-spark-v2-533369688838.us-central1.run.app/dev/echo"
+  # leave this blank for now unless you want /test/drive-notify to run
+  - variable: DRIVE_FOLDER_ID
+    value: ""
+  - variable: DRIVE_VERIFY_TOKEN
+    value: ""
 
 secrets:
   - variable: GOOGLE_CLIENT_ID
