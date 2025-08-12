@@ -1,30 +1,9 @@
-# apphosting.yaml — Firebase App Hosting config
-
-run:
-  cpu: 1
-  memoryMiB: 512
-  minInstances: 0
-  maxInstances: 3
+# Minimal, known-good apphosting.yaml
 
 env:
   variables:
     - variable: NODE_ENV
       value: "production"
-
-    - variable: APP_HOST_URL
-      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app"
-
-    # For now, point the “processor” to the local echo endpoint so tests pass.
-    - variable: PROCESS_WEBHOOK_URL
-      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app/dev/echo"
-
-    # TODO: put your real Drive root folder ID here when you’re ready
-    - variable: DRIVE_FOLDER_ID
-      value: ""
-
-    # Optional shared secret for /drive/notify
-    - variable: DRIVE_VERIFY_TOKEN
-      value: ""
 
   secrets:
     - variable: GOOGLE_CLIENT_ID
