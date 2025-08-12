@@ -1,4 +1,4 @@
-# apphosting.yaml – Firebase App Hosting config for SPARK v2 (Node.js)
+# apphosting.yaml — Firebase App Hosting config
 
 run:
   cpu: 1
@@ -7,7 +7,25 @@ run:
   maxInstances: 3
 
 env:
-  # Secrets pulled from Secret Manager
+  variables:
+    - variable: NODE_ENV
+      value: "production"
+
+    - variable: APP_HOST_URL
+      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app"
+
+    # For now, point the “processor” to the local echo endpoint so tests pass.
+    - variable: PROCESS_WEBHOOK_URL
+      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app/dev/echo"
+
+    # TODO: put your real Drive root folder ID here when you’re ready
+    - variable: DRIVE_FOLDER_ID
+      value: ""
+
+    # Optional shared secret for /drive/notify
+    - variable: DRIVE_VERIFY_TOKEN
+      value: ""
+
   secrets:
     - variable: GOOGLE_CLIENT_ID
       secret: GOOGLE_CLIENT_ID
@@ -15,24 +33,3 @@ env:
       secret: GOOGLE_CLIENT_SECRET
     - variable: GOOGLE_REFRESH_TOKEN
       secret: GOOGLE_REFRESH_TOKEN
-
-  # Plain environment variables (must be a list of {variable, value})
-  variables:
-    - variable: NODE_ENV
-      value: "production"
-
-    # copy your actual hosted URL here
-    - variable: APP_HOST_URL
-      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app"
-
-    # for quick testing we point to the local echo endpoint
-    - variable: PROCESS_WEBHOOK_URL
-      value: "https://project-spark-v2--project-spark-v2.us-central1.hosted.app/dev/echo"
-
-    # put your real Drive root folder ID when ready
-    - variable: DRIVE_FOLDER_ID
-      value: ""
-
-    # optional shared secret used by /drive/notify
-    - variable: DRIVE_VERIFY_TOKEN
-      value: ""
